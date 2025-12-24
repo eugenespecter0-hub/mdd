@@ -1473,6 +1473,60 @@ router.post("/:id/purchase-license", requireAuth(), async (req, res) => {
 });
 
 /**
+ * GET /api/sounds/public
+ * Get all approved sounds (public endpoint, no auth required)
+ */
+router.get("/public", async (req, res) => {
+  try {
+    const { category, search, page = 1, limit = 100 } = req.query;
+
+    const query = {
+      approved: true,
+      availableForLicensing: true,
+    };
+
+    if (category && category !== "all") {
+      query.category = category;
+    }
+
+    if (search) {
+      query.$or = [
+        { title: { $regex: search, $options: "i" } },
+        { description: { $regex: search, $options: "i" } },
+        { tags: { $in: [new RegExp(search, "i")] } },
+      ];
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const sounds = await Sound.find(query)
+      .populate("user", "userName email")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const total = await Sound.countDocuments(query);
+
+    return res.status(200).json({
+      success: true,
+      sounds,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / parseInt(limit)),
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching public sounds:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching sounds",
+    });
+  }
+});
+
+/**
  * GET /api/sounds/approved
  * Get all approved sounds available for licensing (for filmmakers)
  */

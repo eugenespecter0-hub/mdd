@@ -213,6 +213,103 @@ router.post(
 );
 
 /**
+ * GET /api/photography/photographers
+ * Get all photographers (public endpoint, no auth required)
+ */
+router.get("/photographers", async (req, res) => {
+  try {
+    const { search, specialty } = req.query;
+
+    // Find all users with photographer creator type
+    const userQuery = {
+      $or: [
+        { creatorType: "photographer" },
+        { additionalCreatorTypes: "photographer" },
+      ],
+    };
+
+    const users = await User.find(userQuery)
+      .select("userName firstName lastName email imageUrl bio country creatorType additionalCreatorTypes createdAt")
+      .sort({ createdAt: -1 });
+
+    // Get photo counts for each photographer
+    const photographers = await Promise.all(
+      users.map(async (user) => {
+        const photoCount = await Photo.countDocuments({ user: user._id, released: true });
+        
+        // Determine specialty from photos if not set
+        let photographerSpecialty = specialty;
+        if (!photographerSpecialty) {
+          const photos = await Photo.find({ user: user._id, released: true })
+            .select("category")
+            .limit(10);
+          const categories = photos.map(p => p.category).filter(Boolean);
+          if (categories.length > 0) {
+            // Get most common category
+            const categoryCounts = {};
+            categories.forEach(cat => {
+              categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+            });
+            const sortedCategories = Object.entries(categoryCounts)
+              .sort((a, b) => b[1] - a[1]);
+            photographerSpecialty = sortedCategories.length > 0 ? sortedCategories[0][0] : null;
+          }
+        }
+
+        return {
+          _id: user._id,
+          userName: user.userName,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          email: user.email,
+          imageUrl: user.imageUrl,
+          bio: user.bio,
+          country: user.country,
+          photoCount,
+          specialty: photographerSpecialty,
+        };
+      })
+    );
+
+    // Filter by search query
+    let filteredPhotographers = photographers;
+    if (search) {
+      const query = search.toLowerCase();
+      filteredPhotographers = photographers.filter((p) => {
+        const name =
+          p.userName ||
+          `${p.firstName || ""} ${p.lastName || ""}`.trim() ||
+          p.email;
+        return (
+          name.toLowerCase().includes(query) ||
+          p.bio?.toLowerCase().includes(query) ||
+          p.country?.toLowerCase().includes(query)
+        );
+      });
+    }
+
+    // Filter by specialty
+    if (specialty && specialty !== "all") {
+      filteredPhotographers = filteredPhotographers.filter(
+        (p) => p.specialty?.toLowerCase() === specialty.toLowerCase()
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      photographers: filteredPhotographers,
+      count: filteredPhotographers.length,
+    });
+  } catch (error) {
+    console.error("Error fetching photographers:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching photographers",
+    });
+  }
+});
+
+/**
  * GET /api/photography/my-photos
  * Get user's photos
  */

@@ -278,6 +278,60 @@ router.post(
 );
 
 /**
+ * GET /api/filmmaking/public-videos
+ * Get all released videos (public endpoint, no auth required)
+ */
+router.get("/public-videos", async (req, res) => {
+  try {
+    const { category, search, page = 1, limit = 100 } = req.query;
+
+    const query = {
+      released: true,
+      uploadStatus: "ready",
+    };
+
+    if (category && category !== "all") {
+      query.category = category;
+    }
+
+    if (search) {
+      query.$or = [
+        { title: { $regex: search, $options: "i" } },
+        { filmmaker: { $regex: search, $options: "i" } },
+        { description: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const videos = await Video.find(query)
+      .populate("user", "userName email")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const total = await Video.countDocuments(query);
+
+    return res.status(200).json({
+      success: true,
+      videos,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / parseInt(limit)),
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching public videos:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching videos",
+    });
+  }
+});
+
+/**
  * GET /api/filmmaking/my-videos
  * Get user's videos
  */

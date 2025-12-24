@@ -1,0 +1,42 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node ./src/app.js",
+    "dev": "nodemon ./src/app.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.943.0",
+    "@aws-sdk/s3-request-presigner": "^3.943.0",
+    "@clerk/express": "^1.7.55",
+    "@story-protocol/core-sdk": "^1.4.2",
+    "axios": "^1.7.7",
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "csv-parser": "^3.2.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "fluent-ffmpeg": "^2.1.3",
+    "form-data": "^4.0.1",
+    "jsonwebtoken": "^9.0.2",
+    "meilisearch": "^0.54.0",
+    "mongoose": "^9.0.0",
+    "multer": "^2.0.2",
+    "music-metadata": "^11.10.3",
+    "nft.storage": "^7.1.1",
+    "node-cron": "^4.2.1",
+    "pdfkit": "^0.15.0",
+    "stripe": "^17.7.0",
+    "viem": "^2.43.2",
+    "xml2js": "^0.6.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  }
+}

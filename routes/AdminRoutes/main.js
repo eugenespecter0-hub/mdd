@@ -876,6 +876,7 @@ router.get("/playlists", requireAdmin, async (req, res) => {
       .populate({
         path: "tracks.trackId",
         select: "title artist",
+        options: { strictPopulate: false }, // Don't fail if track is deleted
       })
       .sort({ createdAt: -1 });
 
@@ -941,6 +942,7 @@ router.patch("/playlists/:id/status", requireAdmin, async (req, res) => {
     await playlist.populate({
       path: "tracks.trackId",
       select: "title artist",
+      options: { strictPopulate: false },
     });
 
     return res.status(200).json({
@@ -953,6 +955,43 @@ router.patch("/playlists/:id/status", requireAdmin, async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Server error updating playlist status",
+    });
+  }
+});
+
+/**
+ * GET /api/admin/playlists/:id
+ * Get a single playlist by ID with populated tracks
+ */
+router.get("/playlists/:id", requireAdmin, async (req, res) => {
+  try {
+    const playlist = await Playlist.findById(req.params.id)
+      .populate({
+        path: "user",
+        select: "userName email",
+      })
+      .populate({
+        path: "tracks.trackId",
+        select: "title artist",
+        options: { strictPopulate: false },
+      });
+
+    if (!playlist) {
+      return res.status(404).json({
+        success: false,
+        message: "Playlist not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      playlist,
+    });
+  } catch (error) {
+    console.error("Error fetching playlist:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching playlist",
     });
   }
 });

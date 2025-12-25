@@ -95,6 +95,7 @@ app.use('/api/tracking', require('../routes/TrackingRoutes/main'));
 app.use('/api/royalties', require('../routes/RoyaltyRoutes/main'));
 app.use('/api/sounds', require('../routes/SoundRoutes/main'));
 app.use("/api/music-group", musicGroupRouter);
+app.use('/api/donations', require('../routes/DonationRoutes/main'));
 
 // Stripe webhook (must be before JSON parsing middleware for raw body)
 app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }), licenseRouter);

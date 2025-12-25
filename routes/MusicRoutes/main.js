@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const multer = require("multer");
 const { requireAuth } = require("@clerk/express");
+const AdmZip = require("adm-zip");
 const Track = require("../../models/TrackModel");
 const Album = require("../../models/AlbumModel");
 const User = require("../../models/User");
@@ -20,20 +21,33 @@ const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 100 * 1024 * 1024, // 100MB max file size
+    fileSize: 500 * 1024 * 1024, // 500MB max file size (for ZIP files)
   },
   fileFilter: (req, file, cb) => {
     // Allow audio files
-    if (file.fieldname === "audio") {
+    if (file.fieldname === "audio" || file.fieldname === "audioFiles") {
       const allowedTypes = ["audio/mpeg", "audio/wav", "audio/flac", "audio/x-wav", "audio/mp3"];
-      if (allowedTypes.includes(file.mimetype)) {
+      if (allowedTypes.includes(file.mimetype) || file.originalname.toLowerCase().endsWith(".mp3")) {
         cb(null, true);
       } else {
         cb(new Error("Invalid audio file type. Only MP3, WAV, and FLAC are allowed."), false);
       }
     }
+    // Allow ZIP files for EP upload
+    else if (file.fieldname === "zipFile") {
+      if (
+        file.mimetype === "application/zip" ||
+        file.mimetype === "application/x-zip-compressed" ||
+        file.mimetype === "application/octet-stream" ||
+        file.originalname.toLowerCase().endsWith(".zip")
+      ) {
+        cb(null, true);
+      } else {
+        cb(new Error("Invalid file type. Only ZIP files are allowed."), false);
+      }
+    }
     // Allow image files for thumbnail
-    else if (file.fieldname === "thumbnail" || file.fieldname === "albumThumbnail") {
+    else if (file.fieldname === "thumbnail" || file.fieldname === "albumThumbnail" || file.fieldname === "thumbnails") {
       const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/jpg"];
       if (allowedTypes.includes(file.mimetype)) {
         cb(null, true);
@@ -41,7 +55,7 @@ const upload = multer({
         cb(new Error("Invalid image file type. Only JPEG, PNG, WebP, and GIF are allowed."), false);
       }
     } else {
-      cb(new Error("Unexpected field"), false);
+      cb(new Error("Unexpected field: " + file.fieldname), false);
     }
   },
 });
@@ -322,7 +336,10 @@ router.get("/released", async (req, res) => {
     }
 
     const tracks = await Track.find(query)
-      .populate("user", "userName email imageUrl")
+      .populate({
+        path: "user",
+        select: "_id userName email imageUrl streamingLinks",
+      })
       .sort(sortOption)
       .limit(1000); // Limit to prevent performance issues
 
@@ -522,6 +539,169 @@ router.patch("/:trackId/lyrics", requireAuth(), async (req, res) => {
   }
 });
 
+// Update Track Info
+router.patch("/:trackId", requireAuth(), async (req, res) => {
+  try {
+    const { trackId } = req.params;
+    const { title, artist, album, genre } = req.body;
+
+    // Find user by Clerk ID
+    const user = await User.findOne({ clerkId: req.auth.userId });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // Find track and verify ownership
+    const track = await Track.findOne({
+      _id: trackId,
+      user: user._id,
+    });
+
+    if (!track) {
+      return res.status(404).json({
+        success: false,
+        message: "Track not found or you don't have permission to update it",
+      });
+    }
+
+    // Validate required fields
+    if (title !== undefined && (!title || !title.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: "Track title is required",
+      });
+    }
+
+    if (artist !== undefined && (!artist || !artist.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: "Artist name is required",
+      });
+    }
+
+    if (genre !== undefined) {
+      const validGenres = [
+        "pop",
+        "rock",
+        "hip-hop",
+        "electronic",
+        "jazz",
+        "classical",
+        "country",
+        "r&b",
+        "indie",
+        "other",
+      ];
+      if (!validGenres.includes(genre)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid genre",
+        });
+      }
+    }
+
+    // Update track fields
+    if (title !== undefined) track.title = title.trim();
+    if (artist !== undefined) track.artist = artist.trim();
+    if (album !== undefined) track.album = album.trim();
+    if (genre !== undefined) track.genre = genre;
+
+    await track.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Track updated successfully",
+      track,
+    });
+  } catch (err) {
+    console.error("UPDATE TRACK ERROR:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error updating track",
+    });
+  }
+});
+
+// Update Track Thumbnail
+router.patch(
+  "/:trackId/thumbnail",
+  requireAuth(),
+  upload.single("thumbnail"),
+  async (req, res) => {
+    try {
+      const { trackId } = req.params;
+      const thumbnailFile = req.file;
+
+      // Find user by Clerk ID
+      const user = await User.findOne({ clerkId: req.auth.userId });
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found",
+        });
+      }
+
+      // Find track and verify ownership
+      const track = await Track.findOne({
+        _id: trackId,
+        user: user._id,
+      });
+
+      if (!track) {
+        return res.status(404).json({
+          success: false,
+          message: "Track not found or you don't have permission to update it",
+        });
+      }
+
+      // If thumbnail file is provided, upload it
+      if (thumbnailFile) {
+        const thumbnailUploadResult = await uploadToR2(
+          thumbnailFile.buffer,
+          thumbnailFile.originalname,
+          thumbnailFile.mimetype,
+          "thumbnails"
+        );
+
+        // Update thumbnail
+        track.thumbnail = {
+          fileName: thumbnailFile.originalname,
+          fileSize: thumbnailFile.size,
+          fileType: thumbnailFile.mimetype,
+          fileUrl: thumbnailUploadResult.fileUrl,
+          storageKey: thumbnailUploadResult.storageKey,
+        };
+      } else {
+        // If no file provided, remove thumbnail
+        track.thumbnail = {
+          fileName: "",
+          fileSize: 0,
+          fileType: "",
+          fileUrl: "",
+          storageKey: "",
+        };
+      }
+
+      await track.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Thumbnail updated successfully",
+        track,
+      });
+    } catch (err) {
+      console.error("UPDATE THUMBNAIL ERROR:", err);
+      return res.status(500).json({
+        success: false,
+        message: "Server error updating thumbnail",
+      });
+    }
+  }
+);
+
 // Toggle Track Release Status
 router.patch("/:trackId/release", requireAuth(), async (req, res) => {
   try {
@@ -683,6 +863,458 @@ router.post(
   }
 );
 
+// Extract Audio Files from ZIP
+router.post(
+  "/ep/extract-zip",
+  requireAuth(),
+  upload.single("zipFile"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: "ZIP file is required",
+        });
+      }
+
+      const zipBuffer = req.file.buffer;
+      const zip = new AdmZip(zipBuffer);
+      const zipEntries = zip.getEntries();
+
+      // Filter for audio files only
+      const audioExtensions = [".mp3", ".wav", ".flac", ".m4a", ".aac"];
+      const audioFiles = zipEntries
+        .filter((entry) => {
+          if (entry.isDirectory) return false;
+          const fileName = entry.entryName.toLowerCase();
+          return audioExtensions.some((ext) => fileName.endsWith(ext));
+        })
+        .map((entry) => ({
+          fileName: entry.entryName.split("/").pop(), // Get just the filename
+          fullPath: entry.entryName,
+          size: entry.header.size,
+        }))
+        .sort((a, b) => a.fileName.localeCompare(b.fileName)); // Sort alphabetically
+
+      if (audioFiles.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "No audio files found in ZIP. Supported formats: MP3, WAV, FLAC, M4A, AAC",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        audioFiles,
+        count: audioFiles.length,
+      });
+    } catch (err) {
+      console.error("EXTRACT ZIP ERROR:", err);
+      return res.status(500).json({
+        success: false,
+        message: "Error extracting ZIP file: " + err.message,
+      });
+    }
+  }
+);
+
+// Create EP from ZIP tracks
+router.post(
+  "/ep/create",
+  requireAuth(),
+  upload.fields([
+    { name: "zipFile", maxCount: 1 },
+    { name: "thumbnails", maxCount: 50 }, // Allow up to 50 thumbnails
+    { name: "audioFiles", maxCount: 50 }, // Allow new MP3 uploads
+  ]),
+  async (req, res) => {
+    try {
+      const { epName, tracks: tracksData } = req.body;
+
+      if (!epName || !epName.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "EP name is required",
+        });
+      }
+
+      // Get ZIP file (optional now)
+      const zipFile = req.files?.zipFile?.[0];
+      const zipBuffer = zipFile ? zipFile.buffer : null;
+
+      // Parse tracks data (JSON string)
+      let tracksInfo;
+      try {
+        tracksInfo = typeof tracksData === "string" ? JSON.parse(tracksData) : tracksData;
+        if (!Array.isArray(tracksInfo)) {
+          return res.status(400).json({
+            success: false,
+            message: "Tracks data must be an array",
+          });
+        }
+      } catch (parseError) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid tracks data format",
+        });
+      }
+
+      // Find user
+      const user = await User.findOne({ clerkId: req.auth.userId });
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found",
+        });
+      }
+
+      // Get thumbnail files
+      const thumbnailFiles = req.files?.thumbnails || [];
+      const newAudioFiles = req.files?.audioFiles || [];
+
+      // Extract ZIP if we have zip tracks
+      let zipEntries = [];
+      const audioExtensions = [".mp3", ".wav", ".flac", ".m4a", ".aac"];
+      if (zipBuffer) {
+        const zip = new AdmZip(zipBuffer);
+        zipEntries = zip.getEntries();
+      }
+
+      // Sort tracks by order (maintain user's arrangement)
+      const sortedTracks = [...tracksInfo].sort((a, b) => (a.order || 0) - (b.order || 0));
+
+      const createdTracks = [];
+      const errors = [];
+
+      // Process tracks in order
+      for (let i = 0; i < sortedTracks.length; i++) {
+        const trackInfo = sortedTracks[i];
+
+        // Handle tracks from database - just add the ID
+        if (trackInfo.isFromDB && trackInfo.trackId) {
+          // Verify track belongs to user
+          const dbTrack = await Track.findOne({
+            _id: trackInfo.trackId,
+            user: user._id,
+          });
+          if (dbTrack) {
+            createdTracks.push(trackInfo.trackId);
+          } else {
+            errors.push(`Track not found or doesn't belong to you: ${trackInfo.title}`);
+          }
+          continue;
+        }
+
+        // Handle new MP3 file uploads
+        if (trackInfo.hasAudioFile) {
+          // Find matching audio file - files are sent in order of tracks
+          let fileIndex = 0;
+          for (let j = 0; j < i; j++) {
+            if (sortedTracks[j].hasAudioFile) {
+              fileIndex++;
+            }
+          }
+          const audioFile = newAudioFiles[fileIndex];
+          
+          if (!audioFile) {
+            errors.push(`Audio file not found: ${trackInfo.fileName}`);
+            continue;
+          }
+
+          try {
+            // Generate audio hash
+            let audioHash;
+            try {
+              audioHash = generateAudioHash(audioFile.buffer);
+            } catch (hashError) {
+              errors.push(`Error processing ${trackInfo.fileName}: ${hashError.message}`);
+              continue;
+            }
+
+            // Check for duplicates
+            const existingTrack = await Track.findOne({
+              "audio.audioHash": audioHash,
+            });
+            if (existingTrack) {
+              errors.push(`Duplicate file detected: ${trackInfo.fileName}`);
+              continue;
+            }
+
+            // Get audio duration
+            let durationSeconds = null;
+            try {
+              durationSeconds = await getAudioDuration(audioFile.buffer);
+            } catch (durationError) {
+              console.error(`Error getting duration for ${trackInfo.fileName}:`, durationError);
+            }
+
+            // Upload audio to R2
+            const audioUploadResult = await uploadToR2(
+              audioFile.buffer,
+              audioFile.originalname,
+              audioFile.mimetype,
+              "audio"
+            );
+
+            // Get thumbnail
+            let thumbnailUploadResult = null;
+            const thumbnailFile = thumbnailFiles.find(
+              (f) => f.originalname === trackInfo.thumbnailFileId
+            );
+
+            if (thumbnailFile) {
+              thumbnailUploadResult = await uploadToR2(
+                thumbnailFile.buffer,
+                thumbnailFile.originalname,
+                thumbnailFile.mimetype,
+                "thumbnails"
+              );
+            }
+
+            // Create track
+            const track = await Track.create({
+              user: user._id,
+              title: trackInfo.title,
+              artist: trackInfo.artist,
+              album: epName.trim(),
+              genre: trackInfo.genre,
+              audio: {
+                fileName: audioFile.originalname,
+                fileSize: audioFile.size,
+                fileType: audioFile.mimetype,
+                fileUrl: audioUploadResult.fileUrl,
+                storageKey: audioUploadResult.storageKey,
+                audioHash: audioHash,
+              },
+              thumbnail: thumbnailUploadResult
+                ? {
+                    fileName: thumbnailFile.originalname,
+                    fileSize: thumbnailFile.size,
+                    fileType: thumbnailFile.mimetype,
+                    fileUrl: thumbnailUploadResult.fileUrl,
+                    storageKey: thumbnailUploadResult.storageKey,
+                  }
+                : {
+                    fileName: "",
+                    fileSize: 0,
+                    fileType: "",
+                    fileUrl: "",
+                    storageKey: "",
+                  },
+              durationSeconds: durationSeconds,
+              released: false,
+            });
+
+            // Create TrackRegistry entry
+            try {
+              await TrackRegistry.findOneAndUpdate(
+                { trackId: track._id },
+                {
+                  trackId: track._id,
+                  title: track.title,
+                  artist: track.artist,
+                  isrc: track.isrc || "",
+                  creator: user._id,
+                },
+                { upsert: true, new: true }
+              );
+            } catch (registryError) {
+              console.error("Error creating TrackRegistry entry:", registryError);
+            }
+
+            createdTracks.push(track._id);
+          } catch (trackError) {
+            console.error(`Error creating track ${trackInfo.fileName}:`, trackError);
+            errors.push(`Error processing ${trackInfo.fileName}: ${trackError.message}`);
+          }
+          continue;
+        }
+
+        // Handle tracks from ZIP (existing logic)
+        if (!zipBuffer || !trackInfo.fullPath) {
+          errors.push(`Track source not recognized: ${trackInfo.fileName}`);
+          continue;
+        }
+
+        try {
+          // Find the entry in ZIP
+          const entry = zipEntries.find((e) => e.entryName === trackInfo.fullPath);
+          if (!entry || entry.isDirectory) {
+            errors.push(`File not found: ${trackInfo.fileName}`);
+            continue;
+          }
+
+          // Get audio file buffer
+          const audioBuffer = entry.getData();
+
+          // Validate audio file type
+          const fileName = trackInfo.fileName.toLowerCase();
+          const isValidAudio = audioExtensions.some((ext) => fileName.endsWith(ext));
+          if (!isValidAudio) {
+            errors.push(`Invalid audio file: ${trackInfo.fileName}`);
+            continue;
+          }
+
+          // Get thumbnail for this track (if provided)
+          let thumbnailUploadResult = null;
+          // Find thumbnail by matching the filename (which should be the thumbnailFileId)
+          const thumbnailFile = thumbnailFiles.find(
+            (f) => f.originalname === trackInfo.thumbnailFileId
+          );
+
+          if (thumbnailFile) {
+            thumbnailUploadResult = await uploadToR2(
+              thumbnailFile.buffer,
+              thumbnailFile.originalname,
+              thumbnailFile.mimetype,
+              "thumbnails"
+            );
+          }
+
+          // Generate audio hash
+          let audioHash;
+          try {
+            audioHash = generateAudioHash(audioBuffer);
+          } catch (hashError) {
+            errors.push(`Error processing ${trackInfo.fileName}: ${hashError.message}`);
+            continue;
+          }
+
+          // Check for duplicates
+          const existingTrack = await Track.findOne({
+            "audio.audioHash": audioHash,
+          });
+          if (existingTrack) {
+            errors.push(`Duplicate file detected: ${trackInfo.fileName}`);
+            continue;
+          }
+
+          // Get audio duration
+          let durationSeconds = null;
+          try {
+            durationSeconds = await getAudioDuration(audioBuffer);
+          } catch (durationError) {
+            console.error(`Error getting duration for ${trackInfo.fileName}:`, durationError);
+          }
+
+          // Determine MIME type
+          let mimeType = "audio/mpeg";
+          if (fileName.endsWith(".wav")) mimeType = "audio/wav";
+          else if (fileName.endsWith(".flac")) mimeType = "audio/flac";
+          else if (fileName.endsWith(".m4a")) mimeType = "audio/mp4";
+          else if (fileName.endsWith(".aac")) mimeType = "audio/aac";
+
+          // Upload audio to R2
+          const audioUploadResult = await uploadToR2(
+            audioBuffer,
+            trackInfo.fileName,
+            mimeType,
+            "audio"
+          );
+
+          // Extract title from filename (remove extension)
+          const title = trackInfo.fileName.replace(/\.[^/.]+$/, "");
+
+          // Create track
+          const track = await Track.create({
+            user: user._id,
+            title: trackInfo.title || title,
+            artist: trackInfo.artist || user.userName || "Unknown Artist",
+            album: epName.trim(),
+            genre: trackInfo.genre || "other",
+            audio: {
+              fileName: trackInfo.fileName,
+              fileSize: audioBuffer.length,
+              fileType: mimeType,
+              fileUrl: audioUploadResult.fileUrl,
+              storageKey: audioUploadResult.storageKey,
+              audioHash: audioHash,
+            },
+            thumbnail: thumbnailUploadResult
+              ? {
+                  fileName: thumbnailFile.originalname,
+                  fileSize: thumbnailFile.size,
+                  fileType: thumbnailFile.mimetype,
+                  fileUrl: thumbnailUploadResult.fileUrl,
+                  storageKey: thumbnailUploadResult.storageKey,
+                }
+              : {
+                  fileName: "",
+                  fileSize: 0,
+                  fileType: "",
+                  fileUrl: "",
+                  storageKey: "",
+                },
+            durationSeconds: durationSeconds,
+            released: false,
+          });
+
+          // Create TrackRegistry entry
+          try {
+            await TrackRegistry.findOneAndUpdate(
+              { trackId: track._id },
+              {
+                trackId: track._id,
+                title: track.title,
+                artist: track.artist,
+                isrc: track.isrc || "",
+                creator: user._id,
+              },
+              { upsert: true, new: true }
+            );
+          } catch (registryError) {
+            console.error("Error creating TrackRegistry entry:", registryError);
+          }
+
+          createdTracks.push(track._id);
+        } catch (trackError) {
+          console.error(`Error creating track ${trackInfo.fileName}:`, trackError);
+          errors.push(`Error processing ${trackInfo.fileName}: ${trackError.message}`);
+        }
+      }
+
+      if (createdTracks.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "No tracks were created. Errors: " + errors.join(", "),
+          errors,
+        });
+      }
+
+      // Create EP Album
+      const album = await Album.create({
+        user: user._id,
+        name: epName.trim(),
+        description: `EP created from ${createdTracks.length} track(s)`,
+        tracks: createdTracks,
+        thumbnail: {
+          fileName: "",
+          fileSize: 0,
+          fileType: "",
+          fileUrl: "",
+          storageKey: "",
+        },
+      });
+
+      await album.populate("tracks");
+
+      return res.status(201).json({
+        success: true,
+        message: `EP created successfully with ${createdTracks.length} track(s)`,
+        album,
+        createdTracks: createdTracks.length,
+        errors: errors.length > 0 ? errors : undefined,
+      });
+    } catch (err) {
+      console.error("CREATE EP ERROR:", err);
+      return res.status(500).json({
+        success: false,
+        message: "Server error creating EP: " + err.message,
+      });
+    }
+  }
+);
+
 // Get User Albums
 router.get("/albums", requireAuth(), async (req, res) => {
   try {
@@ -709,6 +1341,261 @@ router.get("/albums", requireAuth(), async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Server error fetching albums",
+    });
+  }
+});
+
+// Update Album/EP Info
+router.patch(
+  "/albums/:albumId",
+  requireAuth(),
+  upload.single("albumThumbnail"),
+  async (req, res) => {
+    try {
+      const { albumId } = req.params;
+      const { name, description } = req.body;
+      const thumbnailFile = req.file;
+
+      // Find user by Clerk ID
+      const user = await User.findOne({ clerkId: req.auth.userId });
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found",
+        });
+      }
+
+      // Find album and verify ownership
+      const album = await Album.findOne({
+        _id: albumId,
+        user: user._id,
+      });
+
+      if (!album) {
+        return res.status(404).json({
+          success: false,
+          message: "Album not found or you don't have permission to update it",
+        });
+      }
+
+      // Update name if provided
+      if (name !== undefined && name.trim() !== "") {
+        album.name = name.trim();
+      }
+
+      // Update description if provided
+      if (description !== undefined) {
+        album.description = description.trim();
+      }
+
+      // Update thumbnail if provided
+      if (thumbnailFile) {
+        const thumbnailUploadResult = await uploadToR2(
+          thumbnailFile.buffer,
+          thumbnailFile.originalname,
+          thumbnailFile.mimetype,
+          "thumbnails"
+        );
+
+        album.thumbnail = {
+          fileName: thumbnailFile.originalname,
+          fileSize: thumbnailFile.size,
+          fileType: thumbnailFile.mimetype,
+          fileUrl: thumbnailUploadResult.fileUrl,
+          storageKey: thumbnailUploadResult.storageKey,
+        };
+      }
+
+      await album.save();
+
+      // Populate tracks before returning
+      await album.populate("tracks");
+
+      return res.status(200).json({
+        success: true,
+        message: "Album updated successfully",
+        album,
+      });
+    } catch (err) {
+      console.error("UPDATE ALBUM ERROR:", err);
+      return res.status(500).json({
+        success: false,
+        message: "Server error updating album",
+      });
+    }
+  }
+);
+
+// Delete Album/EP
+router.delete("/albums/:albumId", requireAuth(), async (req, res) => {
+  try {
+    const { albumId } = req.params;
+
+    // Find user by Clerk ID
+    const user = await User.findOne({ clerkId: req.auth.userId });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // Find album and verify ownership, populate tracks
+    const album = await Album.findOne({
+      _id: albumId,
+      user: user._id,
+    }).populate("tracks");
+
+    if (!album) {
+      return res.status(404).json({
+        success: false,
+        message: "Album not found or you don't have permission to delete it",
+      });
+    }
+
+    // Get track IDs from the album
+    const trackIds = album.tracks.map((track) => track._id || track);
+
+    // Delete all tracks in the album (verify they belong to the user)
+    if (trackIds.length > 0) {
+      const deleteResult = await Track.deleteMany({
+        _id: { $in: trackIds },
+        user: user._id, // Ensure tracks belong to the user
+      });
+      console.log(`Deleted ${deleteResult.deletedCount} tracks from album ${albumId}`);
+    }
+
+    // Delete the album
+    await Album.findByIdAndDelete(albumId);
+
+    // TODO: Optionally delete thumbnail and track files from R2 storage if needed
+
+    return res.status(200).json({
+      success: true,
+      message: `Album and ${trackIds.length} track(s) deleted successfully`,
+      tracksDeleted: trackIds.length,
+    });
+  } catch (err) {
+    console.error("DELETE ALBUM ERROR:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error deleting album",
+    });
+  }
+});
+
+// Release All Tracks in Album/EP
+router.patch("/albums/:albumId/release", requireAuth(), async (req, res) => {
+  try {
+    const { albumId } = req.params;
+    const { released } = req.body;
+
+    // Find user by Clerk ID
+    const user = await User.findOne({ clerkId: req.auth.userId });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // Find album and verify ownership
+    const album = await Album.findOne({
+      _id: albumId,
+      user: user._id,
+    }).populate("tracks");
+
+    if (!album) {
+      return res.status(404).json({
+        success: false,
+        message: "Album not found or you don't have permission to update it",
+      });
+    }
+
+    // Update all tracks in the album
+    const releaseStatus = released !== undefined ? released : true;
+    const updateResult = await Track.updateMany(
+      {
+        _id: { $in: album.tracks.map((t) => t._id) },
+        user: user._id,
+      },
+      { $set: { released: releaseStatus } }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: releaseStatus
+        ? `All ${album.tracks.length} tracks marked as released`
+        : `All ${album.tracks.length} tracks marked as not released`,
+      tracksUpdated: updateResult.modifiedCount,
+    });
+  } catch (err) {
+    console.error("RELEASE ALBUM TRACKS ERROR:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error releasing album tracks",
+    });
+  }
+});
+
+// Get Released Albums/EPs (Public)
+router.get("/albums/released", async (req, res) => {
+  try {
+    const { search, sort = "recent" } = req.query;
+
+    // Build query - albums where all tracks are released and approved
+    // We'll use aggregation to filter albums with released tracks
+    let matchStage = {
+      // Match albums with at least one released track
+      "tracks.released": true,
+      "tracks.approved": true,
+    };
+
+    // Search filter
+    if (search) {
+      matchStage.$or = [
+        { name: { $regex: search, $options: "i" } },
+        { description: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    // Sort options
+    let sortOption = { createdAt: -1 }; // default: recent
+    if (sort === "oldest") {
+      sortOption = { createdAt: 1 };
+    } else if (sort === "name") {
+      sortOption = { name: 1 };
+    }
+
+    // Find albums with populated tracks, then filter to only include albums where all tracks are released
+    const albums = await Album.find()
+      .populate({
+        path: "tracks",
+        match: { released: true, approved: true },
+        select: "title artist album genre thumbnail audio durationSeconds createdAt released",
+      })
+      .populate({
+        path: "user",
+        select: "userName imageUrl streamingLinks",
+      })
+      .sort(sortOption)
+      .limit(100);
+
+    // Filter out albums with no released tracks
+    const releasedAlbums = albums.filter(
+      (album) => album.tracks && album.tracks.length > 0
+    );
+
+    return res.status(200).json({
+      success: true,
+      albums: releasedAlbums,
+      count: releasedAlbums.length,
+    });
+  } catch (err) {
+    console.error("GET RELEASED ALBUMS ERROR:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching released albums",
     });
   }
 });

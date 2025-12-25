@@ -22,6 +22,8 @@ const Playlist = require("../../models/PlaylistModel");
 const Settings = require("../../models/SettingsModel");
 const Sound = require("../../models/SoundModel");
 const SoundLicense = require("../../models/SoundLicenseModel");
+const Album = require("../../models/AlbumModel");
+const Donation = require("../../models/DonationModel");
 
 // Middleware to require admin
 async function requireAdmin(req, res, next) {
@@ -1319,6 +1321,182 @@ router.get("/licensing-activity", requireAdmin, async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Server error fetching licensing activity",
+    });
+  }
+});
+
+/**
+ * GET /api/admin/albums
+ * Get all albums/EPs (admin only)
+ */
+router.get("/albums", requireAdmin, async (req, res) => {
+  try {
+    const { search } = req.query;
+
+    const query = {};
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: "i" } },
+        { description: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const albums = await Album.find(query)
+      .populate("user", "userName email imageUrl")
+      .populate({
+        path: "tracks",
+        select: "title artist album genre thumbnail audio durationSeconds createdAt released approved",
+      })
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      albums,
+    });
+  } catch (error) {
+    console.error("Error fetching albums:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching albums",
+    });
+  }
+});
+
+/**
+ * POST /api/admin/albums/:id/approve
+ * Approve all tracks in an album/EP (admin only)
+ */
+router.post("/albums/:id/approve", requireAdmin, async (req, res) => {
+  try {
+    const album = await Album.findById(req.params.id).populate("tracks");
+    if (!album) {
+      return res.status(404).json({
+        success: false,
+        message: "Album not found",
+      });
+    }
+
+    // Approve all tracks in the album
+    const updateResult = await Track.updateMany(
+      { _id: { $in: album.tracks.map((t) => t._id) } },
+      {
+        $set: {
+          approved: true,
+          released: true,
+          uploadStatus: "ready",
+        },
+      }
+    );
+
+    await AuditLog.create({
+      user: req.user._id,
+      action: "album_approved",
+      resourceType: "album",
+      resourceId: album._id,
+      status: "success",
+    });
+
+    // Refresh album with updated tracks
+    await album.populate("tracks");
+
+    return res.status(200).json({
+      success: true,
+      message: `All ${album.tracks.length} tracks in "${album.name}" approved and released`,
+      album,
+      tracksUpdated: updateResult.modifiedCount,
+    });
+  } catch (error) {
+    console.error("Error approving album:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error approving album",
+    });
+  }
+});
+
+/**
+ * POST /api/admin/albums/:id/reject
+ * Reject all tracks in an album/EP (admin only)
+ */
+router.post("/albums/:id/reject", requireAdmin, async (req, res) => {
+  try {
+    const { reason } = req.body;
+    const album = await Album.findById(req.params.id).populate("tracks");
+    if (!album) {
+      return res.status(404).json({
+        success: false,
+        message: "Album not found",
+      });
+    }
+
+    // Reject all tracks in the album
+    const updateResult = await Track.updateMany(
+      { _id: { $in: album.tracks.map((t) => t._id) } },
+      {
+        $set: {
+          approved: false,
+          released: false,
+          uploadStatus: "failed",
+        },
+      }
+    );
+
+    await AuditLog.create({
+      user: req.user._id,
+      action: "album_rejected",
+      resourceType: "album",
+      resourceId: album._id,
+      status: "success",
+      metadata: { reason: reason || "" },
+    });
+
+    // Refresh album with updated tracks
+    await album.populate("tracks");
+
+    return res.status(200).json({
+      success: true,
+      message: `All ${album.tracks.length} tracks in "${album.name}" rejected`,
+      album,
+      tracksUpdated: updateResult.modifiedCount,
+    });
+  } catch (error) {
+    console.error("Error rejecting album:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error rejecting album",
+    });
+  }
+});
+
+/**
+ * GET /api/admin/donations
+ * Get all donations (admin only)
+ */
+router.get("/donations", requireAdmin, async (req, res) => {
+  try {
+    const { search } = req.query;
+
+    const query = {};
+    if (search) {
+      query.$or = [
+        { message: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const donations = await Donation.find(query)
+      .populate("donor", "userName email imageUrl")
+      .populate("recipient", "userName email imageUrl")
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      donations,
+    });
+  } catch (error) {
+    console.error("Error fetching donations:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching donations",
     });
   }
 });

@@ -24,6 +24,7 @@ const SoundLicense = require("../../models/SoundLicenseModel");
 const SoundLicenseTemplate = require("../../models/SoundLicenseTemplateModel");
 const { generateAndUploadSoundLicenseCertificates } = require("../../utils/soundLicenseCertificate");
 const { mintStoryLicenseToken } = require("../../utils/storyLicenseOnChain");
+const Donation = require("../../models/DonationModel");
 
 // Stripe
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
@@ -208,6 +209,58 @@ router.post("/webhook", async (req, res) => {
   try {
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
+
+      // --- Donations ---
+      if (session?.metadata?.resourceType === "donation") {
+        const donorId = session.metadata.donorId;
+        const recipientId = session.metadata.recipientId;
+        const amount = parseFloat(session.metadata.amount || "0");
+        const message = session.metadata.message || "";
+
+        const donation = await Donation.findOne({
+          stripeSessionId: session.id,
+        });
+
+        if (!donation) {
+          console.error(`Donation not found for session ${session.id}`);
+          return res.status(200).json({ received: true });
+        }
+
+        if (donation.status === "completed") {
+          return res.status(200).json({ received: true });
+        }
+
+        // Get payment intent
+        const paymentIntent = await stripe.paymentIntents.retrieve(
+          session.payment_intent
+        );
+
+        // Get charge details
+        const charges = await stripe.charges.list({
+          payment_intent: paymentIntent.id,
+        });
+        const charge = charges.data[0];
+
+        // Update donation
+        donation.status = "completed";
+        donation.stripePaymentIntentId = paymentIntent.id;
+        donation.stripeChargeId = charge?.id || "";
+        await donation.save();
+
+        await AuditLog.create({
+          user: donorId,
+          action: "donation_completed",
+          resourceType: "donation",
+          resourceId: donation._id,
+          status: "success",
+          metadata: {
+            recipientId,
+            amount,
+          },
+        });
+
+        return res.status(200).json({ received: true });
+      }
 
       // --- Sound license purchases (MacAdam sounds) ---
       if (session?.metadata?.resourceType === "sound") {

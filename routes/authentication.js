@@ -111,4 +111,49 @@ router.post("/user/add-creator-type", requireAuth(), async (req, res) => {
   }
 });
 
+// Update streaming platform links
+router.put("/user/streaming-links", requireAuth(), async (req, res) => {
+  try {
+    const clerkId = req.auth.userId;
+    const { streamingLinks } = req.body;
+
+    if (!streamingLinks) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Streaming links are required" 
+      });
+    }
+
+    // Validate required fields (Spotify, Apple Music, YouTube Music are mandatory)
+    if (!streamingLinks.spotify || !streamingLinks.appleMusic || !streamingLinks.youtubeMusic) {
+      return res.status(400).json({
+        success: false,
+        message: "Spotify, Apple Music, and YouTube Music links are required",
+      });
+    }
+
+    const user = await User.findOne({ clerkId });
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    // Update streaming links
+    user.streamingLinks = user.streamingLinks || {};
+    Object.keys(streamingLinks).forEach((key) => {
+      if (streamingLinks[key]) {
+        user.streamingLinks[key] = streamingLinks[key].trim();
+      } else {
+        user.streamingLinks[key] = "";
+      }
+    });
+
+    await user.save();
+
+    res.json({ success: true, user });
+  } catch (e) {
+    console.error("Error updating streaming links:", e);
+    res.status(500).json({ success: false, error: "Server error" });
+  }
+});
+
 module.exports = router;

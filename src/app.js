@@ -70,6 +70,8 @@ if (process.env.CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY) {
     clerkMiddleware({
       publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
       secretKey: process.env.CLERK_SECRET_KEY,
+      // Don't redirect on auth failure - let routes handle it
+      signInUrl: undefined,
     })
   );
   console.log("Clerk middleware configured successfully");

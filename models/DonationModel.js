@@ -2,11 +2,16 @@ const mongoose = require("mongoose");
 
 const DonationSchema = new mongoose.Schema(
   {
-    // Donor (who made the donation)
+    // Donor (who made the donation) - optional for anonymous donations
     donor: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      required: false, // Allow anonymous donations
+    },
+    // Donor email for anonymous donations (from Stripe)
+    donorEmail: {
+      type: String,
+      default: "",
     },
     // Recipient (artist who receives the donation)
     recipient: {
@@ -27,11 +32,14 @@ const DonationSchema = new mongoose.Schema(
     // Stripe
     stripePaymentIntentId: {
       type: String,
-      required: true,
+      required: false, // Will be filled by webhook after payment
       unique: true,
+      sparse: true, // Allows multiple null/undefined values
     },
     stripeSessionId: {
       type: String,
+      required: true,
+      unique: true,
     },
     stripeChargeId: {
       type: String,

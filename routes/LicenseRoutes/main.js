@@ -212,54 +212,99 @@ router.post("/webhook", async (req, res) => {
 
       // --- Donations ---
       if (session?.metadata?.resourceType === "donation") {
+        console.log(`Processing donation webhook for session: ${session.id}`);
+        
         const donorId = session.metadata.donorId;
         const recipientId = session.metadata.recipientId;
         const amount = parseFloat(session.metadata.amount || "0");
         const message = session.metadata.message || "";
 
-        const donation = await Donation.findOne({
+        // Find donation by session ID
+        let donation = await Donation.findOne({
           stripeSessionId: session.id,
         });
 
         if (!donation) {
           console.error(`Donation not found for session ${session.id}`);
-          return res.status(200).json({ received: true });
+          // Try to create it if it doesn't exist (shouldn't happen, but handle it)
+          return res.status(200).json({ received: true, message: "Donation not found" });
         }
 
+        // If already completed, just acknowledge
         if (donation.status === "completed") {
-          return res.status(200).json({ received: true });
+          console.log(`Donation ${donation._id} already completed`);
+          return res.status(200).json({ received: true, message: "Already completed" });
         }
 
-        // Get payment intent
-        const paymentIntent = await stripe.paymentIntents.retrieve(
-          session.payment_intent
-        );
+        // Check payment status from session
+        if (session.payment_status !== "paid") {
+          console.log(`Session ${session.id} payment status: ${session.payment_status}`);
+          return res.status(200).json({ received: true, message: "Payment not completed yet" });
+        }
 
-        // Get charge details
-        const charges = await stripe.charges.list({
-          payment_intent: paymentIntent.id,
-        });
-        const charge = charges.data[0];
+        // Get payment intent if available
+        let paymentIntentId = null;
+        let chargeId = null;
+        
+        if (session.payment_intent) {
+          try {
+            const paymentIntent = await stripe.paymentIntents.retrieve(
+              session.payment_intent
+            );
+            paymentIntentId = paymentIntent.id;
+            
+            // Get charge details
+            const charges = await stripe.charges.list({
+              payment_intent: paymentIntent.id,
+              limit: 1,
+            });
+            if (charges.data && charges.data.length > 0) {
+              chargeId = charges.data[0].id;
+            }
+          } catch (error) {
+            console.error(`Error retrieving payment intent for session ${session.id}:`, error);
+            // Continue anyway - we can still mark as completed based on session status
+          }
+        }
 
-        // Update donation
+        // Update donation to completed
         donation.status = "completed";
-        donation.stripePaymentIntentId = paymentIntent.id;
-        donation.stripeChargeId = charge?.id || "";
+        if (paymentIntentId) {
+          donation.stripePaymentIntentId = paymentIntentId;
+        }
+        if (chargeId) {
+          donation.stripeChargeId = chargeId;
+        }
+        
+        // Store donor email from Stripe if available and donation is anonymous
+        if (session.customer_email && !donation.donor) {
+          donation.donorEmail = session.customer_email;
+        }
+        
         await donation.save();
+        console.log(`Donation ${donation._id} marked as completed`);
 
-        await AuditLog.create({
-          user: donorId,
-          action: "donation_completed",
-          resourceType: "donation",
-          resourceId: donation._id,
-          status: "success",
-          metadata: {
-            recipientId,
-            amount,
-          },
-        });
+        // Only create audit log if donor is logged in (not anonymous)
+        if (donorId && donorId !== "anonymous" && donation.donor) {
+          try {
+            await AuditLog.create({
+              user: donation.donor,
+              action: "donation_completed",
+              resourceType: "donation",
+              resourceId: donation._id,
+              status: "success",
+              metadata: {
+                recipientId,
+                amount,
+              },
+            });
+          } catch (auditError) {
+            console.error("Error creating audit log:", auditError);
+            // Don't fail the webhook if audit log fails
+          }
+        }
 
-        return res.status(200).json({ received: true });
+        return res.status(200).json({ received: true, donationId: donation._id });
       }
 
       // --- Sound license purchases (MacAdam sounds) ---

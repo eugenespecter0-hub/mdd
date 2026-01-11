@@ -524,4 +524,143 @@ router.post("/fix-pending", async (req, res) => {
   }
 });
 
+
+router.post('/consult-checkout-session', async (req, res) => {
+  try {
+    const { amount, productName, customerEmail, metadata } = req.body;
+
+    // Validate input
+    if (!amount || !productName) {
+      return res.status(400).json({ error: 'Amount and product name are required' });
+    }
+
+    // Create session with additional metadata
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: {
+              name: productName,
+              description: '60-minute consultation with Patricia Macadam (Zoom)',
+              images: ['https://your-domain.com/founder-avatar.jpg'],
+            },
+            unit_amount: amount, // in cents
+          },
+          quantity: 1,
+        },
+      ],
+      mode: 'payment',
+      success_url: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/consultation/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/consultation/cancel`,
+      customer_email: customerEmail || undefined,
+      metadata: {
+        ...metadata,
+        product_type: 'consultation',
+        duration_minutes: '60',
+        host: 'Patricia Macadam',
+        company: 'Macadam Co',
+        timestamp: new Date().toISOString()
+      },
+      billing_address_collection: 'required',
+      shipping_address_collection: {
+        allowed_countries: ['US', 'CA', 'GB', 'AU'],
+      },
+    });
+
+    res.json({ url: session.url });
+  } catch (error) {
+    console.error('Stripe error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+// Webhook for Stripe events (for fulfillment)
+router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (err) {
+    console.error('Webhook signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Handle the event
+  switch (event.type) {
+    case 'checkout.session.completed':
+      const session = event.data.object;
+      
+      // Fulfill the order
+      await handleSuccessfulPayment(session);
+      break;
+      
+    case 'payment_intent.succeeded':
+      const paymentIntent = event.data.object;
+      console.log('PaymentIntent was successful!', paymentIntent.id);
+      break;
+      
+    default:
+      console.log(`Unhandled event type ${event.type}`);
+  }
+
+  res.json({ received: true });
+});
+
+// In your server.js
+router.get('/verify-consult-payment', async (req, res) => {
+  try {
+    const { session_id } = req.query;
+    
+    if (!session_id) {
+      return res.status(400).json({ 
+        verified: false, 
+        error: 'No session ID provided' 
+      });
+    }
+
+    // Verify with Stripe
+    const session = await stripe.checkout.sessions.retrieve(session_id);
+
+    // Check if payment was successful
+    if (session.payment_status !== 'paid') {
+      return res.status(402).json({ 
+        verified: false, 
+        error: 'Payment not completed' 
+      });
+    }
+
+    // Return simple verification
+    res.json({
+      verified: true,
+      session: {
+        id: session.id,
+        customer_email: session.customer_email,
+        amount_paid: session.amount_total / 100,
+        currency: session.currency,
+        created: new Date(session.created * 1000).toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error('Verification error:', error);
+    
+    if (error.type === 'StripeInvalidRequestError') {
+      return res.status(400).json({ 
+        verified: false, 
+        error: 'Invalid session ID' 
+      });
+    }
+    
+    res.status(500).json({ 
+      verified: false, 
+      error: 'Server error during verification' 
+    });
+  }
+});
 module.exports = router;
